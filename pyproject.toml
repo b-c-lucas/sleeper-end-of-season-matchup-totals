@@ -4,10 +4,9 @@ version = "0.1.0"
 description = ""
 authors = ["Brad Lucas <brad.lucas@live.com>"]
 readme = "README.md"
-packages = [{include = "sleeper_end_of_season_matchup_totals"}]
 
 [tool.poetry.dependencies]
-python = "^3.9"
+python = "^3.11"
 requests = "^2.28.1"
 click = "^8.1.3"
 

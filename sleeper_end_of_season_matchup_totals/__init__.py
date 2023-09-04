@@ -95,11 +95,12 @@ def league_season_totals(
         for week_matchup_team in week_matchups:
             roster_id = week_matchup_team["roster_id"]
 
-            week_matchup_team_score: float = (
+            week_matchup_team_score: float = round(
                 week_matchup_team["custom_points"]
                 if "custom_points" in week_matchup_team
                 and week_matchup_team["custom_points"]
-                else week_matchup_team["points"]
+                else week_matchup_team["points"],
+                2,
             )
 
             weekly_scores_by_roster_id[roster_id].append(week_matchup_team_score)
@@ -139,7 +140,7 @@ def league_season_totals(
 
         output_string_parts: list[str] = [
             team_name,
-            f"@{user_name}):",
+            f"(@{user_name}):",
             str(total_score),
         ]
 
