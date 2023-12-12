@@ -74,25 +74,28 @@ def league_season_totals(
     debug_roster_id: Optional[int],
     debug_starters: bool,
 ) -> None:
-    sleeper_nfl_api_client = SleeperNflApiClient()
     sleeper_league_api_client = SleeperLeagueApiClient(league_id)
 
     with ThreadPoolExecutor() as executor:
         first_wave_futures: list[Future] = [
-            executor.submit(sleeper_nfl_api_client.fetch_players),
             executor.submit(sleeper_league_api_client.fetch_users_by_id),
             executor.submit(sleeper_league_api_client.fetch_rosters_by_id),
+            executor.submit(
+                SleeperNflApiClient().fetch_players if debug_starters else lambda: {}
+            ),
         ]
 
         wait(first_wave_futures)
 
-        players: dict[int, dict[str, Any]] = first_wave_futures[0].result()
-        users_by_id: dict[str, dict[str, Any]] = first_wave_futures[1].result()
-        rosters_by_id: dict[int, dict[str, Any]] = first_wave_futures[2].result()
+        users_by_id: dict[str, dict[str, Any]] = first_wave_futures[0].result()
+        rosters_by_id: dict[int, dict[str, Any]] = first_wave_futures[1].result()
+        players: dict[int, dict[str, Any]] = first_wave_futures[2].result()
 
-        weekly_scores_by_roster_id: dict[int, list[float]] = defaultdict(list)
+    weekly_scores_by_roster_id: dict[int, list[float]] = defaultdict(list)
 
+    with ThreadPoolExecutor() as executor:
         week_matchups_by_number: dict[int, list[dict[str, Any]]] = {}
+
         for fetch_matchup in as_completed(
             executor.submit(sleeper_league_api_client.fetch_matchups, week)
             for week in range(start_week, end_week + 1)
@@ -128,40 +131,40 @@ def league_season_totals(
                                 f"{player['first_name']} {player['last_name']} ({player['team']})"
                             )
 
-        scores_by_roster_id: dict[int, float] = {
-            roster_id: round(sum(weekly_scores), 2)
-            for roster_id, weekly_scores in weekly_scores_by_roster_id.items()
-        }
+    scores_by_roster_id: dict[int, float] = {
+        roster_id: round(sum(weekly_scores), 2)
+        for roster_id, weekly_scores in weekly_scores_by_roster_id.items()
+    }
 
-        for roster_id, total_score in sorted(
-            scores_by_roster_id.items(), key=lambda x: x[1], reverse=True
-        ):
-            roster = rosters_by_id[roster_id]
+    for roster_id, total_score in sorted(
+        scores_by_roster_id.items(), key=lambda x: x[1], reverse=True
+    ):
+        roster = rosters_by_id[roster_id]
 
-            user = users_by_id[roster["owner_id"]]
-            user_name = user["display_name"]
-            team_name = (
-                user["metadata"]["team_name"]
-                if "metadata" in user
-                and user["metadata"]
-                and "team_name" in user["metadata"]
-                and user["metadata"]["team_name"]
-                else f"Team {user_name}"
-            )
+        user = users_by_id[roster["owner_id"]]
+        user_name = user["display_name"]
+        team_name = (
+            user["metadata"]["team_name"]
+            if "metadata" in user
+            and user["metadata"]
+            and "team_name" in user["metadata"]
+            and user["metadata"]["team_name"]
+            else f"Team {user_name}"
+        )
 
-            output_string_parts: list[str] = [
-                team_name,
-                f"(@{user_name}):",
-                str(total_score),
-            ]
+        output_string_parts: list[str] = [
+            team_name,
+            f"(@{user_name}):",
+            str(total_score),
+        ]
 
-            if debug_all_weeks or debug_week:
-                output_string_parts.append(str(weekly_scores_by_roster_id[roster_id]))
+        if debug_all_weeks or debug_week:
+            output_string_parts.append(str(weekly_scores_by_roster_id[roster_id]))
 
-            if debug_all_rosters or debug_roster_id:
-                output_string_parts.append(f"(roster ID: {roster_id})")
+        if debug_all_rosters or debug_roster_id:
+            output_string_parts.append(f"(roster ID: {roster_id})")
 
-            click.echo(" ".join(output_string_parts))
+        click.echo(" ".join(output_string_parts))
 
 
 if __name__ == "__main__":
