@@ -1,6 +1,13 @@
+from collections import defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
 from typing import Any, Optional
+
 import click
-import requests
+
+from sleeper_end_of_season_matchup_totals.api_client import (
+    SleeperLeagueApiClient,
+    SleeperNflApiClient,
+)
 
 SLEEPER_API_BASE_URL = "https://api.sleeper.app/v1"
 
@@ -67,90 +74,94 @@ def league_season_totals(
     debug_roster_id: Optional[int],
     debug_starters: bool,
 ) -> None:
-    if debug_starters:
-        players_response = requests.get(f"{SLEEPER_API_BASE_URL}/players/nfl")
-        players: dict[int, dict[str, Any]] = players_response.json()
+    sleeper_nfl_api_client = SleeperNflApiClient()
+    sleeper_league_api_client = SleeperLeagueApiClient(league_id)
 
-    league_url_base = f"{SLEEPER_API_BASE_URL}/league/{league_id}"
-
-    users_response = requests.get(f"{league_url_base}/users")
-    users_by_id: dict[str, dict[str, Any]] = {
-        user["user_id"]: user for user in users_response.json()
-    }
-
-    rosters_by_id: dict[int, dict[str, Any]] = {}
-    weekly_scores_by_roster_id: dict[int, list[float]] = {}
-
-    rosters_response = requests.get(f"{league_url_base}/rosters")
-    for roster in rosters_response.json():
-        roster_id = roster["roster_id"]
-
-        rosters_by_id.setdefault(roster_id, roster)
-        weekly_scores_by_roster_id.setdefault(roster_id, [])
-
-    for week in range(start_week, end_week + 1):
-        week_matchups_response = requests.get(f"{league_url_base}/matchups/{week}")
-
-        week_matchups: list[dict[str, Any]] = week_matchups_response.json()
-        for week_matchup_team in week_matchups:
-            roster_id = week_matchup_team["roster_id"]
-
-            week_matchup_team_score: float = round(
-                week_matchup_team["custom_points"]
-                if "custom_points" in week_matchup_team
-                and week_matchup_team["custom_points"]
-                else week_matchup_team["points"],
-                2,
-            )
-
-            weekly_scores_by_roster_id[roster_id].append(week_matchup_team_score)
-
-            if (debug_all_weeks or debug_week == week) and (
-                debug_all_rosters or roster_id == debug_roster_id
-            ):
-                click.echo(f"{week=}; {week_matchup_team=}")
-
-                if debug_starters:
-                    for starter_id in week_matchup_team["starters"]:
-                        player = players[starter_id]
-                        click.echo(
-                            f"{player['first_name']} {player['last_name']} ({player['team']})"
-                        )
-
-    scores_by_roster_id: dict[int, float] = {
-        roster_id: round(sum(weekly_scores), 2)
-        for roster_id, weekly_scores in weekly_scores_by_roster_id.items()
-    }
-
-    for roster_id, total_score in sorted(
-        scores_by_roster_id.items(), key=lambda x: x[1], reverse=True
-    ):
-        roster = rosters_by_id[roster_id]
-
-        user = users_by_id[roster["owner_id"]]
-        user_name = user["display_name"]
-        team_name = (
-            user["metadata"]["team_name"]
-            if "metadata" in user
-            and user["metadata"]
-            and "team_name" in user["metadata"]
-            and user["metadata"]["team_name"]
-            else f"Team {user_name}"
-        )
-
-        output_string_parts: list[str] = [
-            team_name,
-            f"(@{user_name}):",
-            str(total_score),
+    with ThreadPoolExecutor() as executor:
+        first_wave_futures: list[Future] = [
+            executor.submit(sleeper_nfl_api_client.fetch_players),
+            executor.submit(sleeper_league_api_client.fetch_users_by_id),
+            executor.submit(sleeper_league_api_client.fetch_rosters_by_id),
         ]
 
-        if debug_all_weeks or debug_week:
-            output_string_parts.append(str(weekly_scores_by_roster_id[roster_id]))
+        wait(first_wave_futures)
 
-        if debug_all_rosters or debug_roster_id:
-            output_string_parts.append(f"(roster ID: {roster_id})")
+        players: dict[int, dict[str, Any]] = first_wave_futures[0].result()
+        users_by_id: dict[str, dict[str, Any]] = first_wave_futures[1].result()
+        rosters_by_id: dict[int, dict[str, Any]] = first_wave_futures[2].result()
 
-        click.echo(" ".join(output_string_parts))
+        weekly_scores_by_roster_id: dict[int, list[float]] = defaultdict(list)
+
+        week_matchups_by_number: dict[int, list[dict[str, Any]]] = {}
+        for fetch_matchup in as_completed(
+            executor.submit(sleeper_league_api_client.fetch_matchups, week)
+            for week in range(start_week, end_week + 1)
+        ):
+            week, matchups = fetch_matchup.result()
+            week_matchups_by_number[week] = matchups
+
+        # still ensure we order the weeks properly after parallelizing work
+        for week, matchups in sorted(week_matchups_by_number.items()):
+            for week_matchup_team in matchups:
+                roster_id = week_matchup_team["roster_id"]
+
+                week_matchup_team_initial_score: float = (
+                    week_matchup_team["custom_points"]
+                    if "custom_points" in week_matchup_team
+                    and week_matchup_team["custom_points"]
+                    else week_matchup_team["points"]
+                )
+
+                week_matchup_team_score = round(week_matchup_team_initial_score, 2)
+
+                weekly_scores_by_roster_id[roster_id].append(week_matchup_team_score)
+
+                if (debug_all_weeks or debug_week == week) and (
+                    debug_all_rosters or roster_id == debug_roster_id
+                ):
+                    click.echo(f"{week=}; {week_matchup_team=}")
+
+                    if debug_starters:
+                        for starter_id in week_matchup_team["starters"]:
+                            player = players[starter_id]
+                            click.echo(
+                                f"{player['first_name']} {player['last_name']} ({player['team']})"
+                            )
+
+        scores_by_roster_id: dict[int, float] = {
+            roster_id: round(sum(weekly_scores), 2)
+            for roster_id, weekly_scores in weekly_scores_by_roster_id.items()
+        }
+
+        for roster_id, total_score in sorted(
+            scores_by_roster_id.items(), key=lambda x: x[1], reverse=True
+        ):
+            roster = rosters_by_id[roster_id]
+
+            user = users_by_id[roster["owner_id"]]
+            user_name = user["display_name"]
+            team_name = (
+                user["metadata"]["team_name"]
+                if "metadata" in user
+                and user["metadata"]
+                and "team_name" in user["metadata"]
+                and user["metadata"]["team_name"]
+                else f"Team {user_name}"
+            )
+
+            output_string_parts: list[str] = [
+                team_name,
+                f"(@{user_name}):",
+                str(total_score),
+            ]
+
+            if debug_all_weeks or debug_week:
+                output_string_parts.append(str(weekly_scores_by_roster_id[roster_id]))
+
+            if debug_all_rosters or debug_roster_id:
+                output_string_parts.append(f"(roster ID: {roster_id})")
+
+            click.echo(" ".join(output_string_parts))
 
 
 if __name__ == "__main__":
