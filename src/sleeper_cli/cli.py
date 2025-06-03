@@ -4,12 +4,10 @@ from typing import Any, Optional
 
 import click
 
-from sleeper_end_of_season_matchup_totals.api_client import (
+from .api_client import (
     SleeperLeagueApiClient,
     SleeperNflApiClient,
 )
-
-SLEEPER_API_BASE_URL = "https://api.sleeper.app/v1"
 
 
 @click.command()
@@ -165,7 +163,3 @@ def league_season_totals(
             output_string_parts.append(f"(roster ID: {roster_id})")
 
         click.echo(" ".join(output_string_parts))
-
-
-if __name__ == "__main__":
-    league_season_totals()
